@@ -43,11 +43,11 @@ struct Puzzle {
 impl Puzzle {
     fn from_input(input: &str, ignore_spaces: bool) -> Result<Self, String> {
         static RE: Lazy<Regex> = Lazy::new(|| Regex::new(
-                r"^\s*Time:(?<times>(\s+[0-9]+)+).*\nDistance:(?<distances>(\s+[0-9]+)+)[.\n]*$"
-                ).unwrap());
+            r"^\s*Time:(?<times>(\s+[0-9]+)+).*\nDistance:(?<distances>(\s+[0-9]+)+)[.\n]*$"
+        ).unwrap());
         let result = RE.captures(input).ok_or("Syntax error")?;
-        let times: Vec<u64>;
-        let distances: Vec<u64>;
+        let times;
+        let distances;
         if ignore_spaces {
             let time_str = result["times"].chars().filter(|&c| c != ' ').collect::<String>();
             times = vec![time_str.parse().unwrap()];
