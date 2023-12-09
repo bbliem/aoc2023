@@ -1,38 +1,47 @@
 pub mod config;
 
 use std::error::Error;
-use std::fs;
+use std::{fs, fmt};
 
-#[derive(Debug)]
-struct MapEntry {
-    source_start: u32,
-    dest_start: u32,
-    range_length: u32,
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct IntervalMapping {
+    a: u64, // start of interval (inclusive)
+    b: u64, // end of interval (exclusive)
+    dest: u64, // mapped value of a
 }
 
-impl MapEntry {
+impl IntervalMapping {
     fn from_line(line: &str) -> Result<Self, String> {
         let mut iter = line.split(' ');
-        let dest_start = iter.next().ok_or("Could not read destination range start")?
+        let dest = iter.next().ok_or("Could not read destination range start")?
             .parse().map_err(|_| "Could not parse destination range start")?;
-        let source_start = iter.next().ok_or("Could not read source range start")?
+        let a = iter.next().ok_or("Could not read source range start")?
             .parse().map_err(|_| "Could not parse source range start")?;
-        let range_length = iter.next().ok_or("Could not read range length")?
+        let range_len: u64 = iter.next().ok_or("Could not read range length")?
             .parse().map_err(|_| "Could not parse range length")?;
-        Ok(MapEntry {source_start, dest_start, range_length})
+        Ok(Self { a, b: a + range_len, dest })
     }
 
-    fn apply(&self, x: u32) -> Option<u32> {
-        if x >= self.source_start && x - self.source_start < self.range_length {
-            Some(self.dest_start + (x - self.source_start))
+    fn contains(&self, x: u64) -> bool {
+        x >= self.a && x < self.b
+    }
+
+    fn apply(&self, x: u64) -> Option<u64> {
+        if self.contains(x) {
+            Some(self.dest + (x - self.a))
         } else {
             None
         }
     }
 
-    fn source_overlaps(&self, other: &MapEntry) -> bool {
-        (self.source_start >= other.source_start && self.source_start < other.source_start + other.range_length)
-        || (other.source_start >= self.source_start && other.source_start < self.source_start + self.range_length)
+    fn source_overlaps(&self, other: &IntervalMapping) -> bool {
+        self.contains(other.a) || other.contains(self.a)
+    }
+}
+
+impl fmt::Display for IntervalMapping {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}, {}) -> [{}, {})", self.a, self.b, self.dest, self.dest + (self.b - self.a))
     }
 }
 
@@ -40,7 +49,7 @@ impl MapEntry {
 struct Map<'a> {
     from_type: &'a str,
     to_type: &'a str,
-    entries: Vec<MapEntry>,
+    entries: Vec<IntervalMapping>,
 }
 
 impl<'a> Map<'a> {
@@ -66,7 +75,7 @@ impl<'a> Map<'a> {
         Ok(Some(Map {from_type, to_type, entries}))
     }
 
-    fn entries_from_iter_until_end_of_block<'b>(iter: &mut impl Iterator<Item = &'b str>) -> Result<Vec<MapEntry>, String> {
+    fn entries_from_iter_until_end_of_block<'b>(iter: &mut impl Iterator<Item = &'b str>) -> Result<Vec<IntervalMapping>, String> {
         let mut entries = vec![];
         // Read until empty line or EOF
         loop {
@@ -74,10 +83,9 @@ impl<'a> Map<'a> {
                 if line.is_empty() {
                     break;
                 }
-                let entry = MapEntry::from_line(line)?;
+                let entry = IntervalMapping::from_line(line)?;
                 if entries.iter().any(|e| entry.source_overlaps(e)) {
-                    println!("Overlap");
-                    return Err(String::from("Overlapping sources"));
+                    return Err("Overlapping sources".into());
                 }
                 entries.push(entry);
             } else {
@@ -87,7 +95,63 @@ impl<'a> Map<'a> {
         Ok(entries)
     }
 
-    fn apply(&self, x: u32) -> u32 {
+    fn fill_holes(sorted_mappings: Vec<IntervalMapping>, max_b: u64) -> Vec<IntervalMapping> {
+        let mut result = vec![];
+        let mut a = 0;
+        for mapping in sorted_mappings {
+            if mapping.a > a {
+                result.push(IntervalMapping { a, b: mapping.a, dest: a });
+            }
+            a = mapping.b;
+            result.push(mapping);
+        }
+        if let Some(last_mapping) = result.last() {
+            if last_mapping.b < max_b {
+                // Create padding IntervalMapping between last_mapping and max_b
+                result.push(IntervalMapping { a: last_mapping.b, b: max_b, dest: last_mapping.b });
+            }
+        }
+        result
+    }
+
+    fn combine(&self, other: &Map<'a>) -> Map<'a> {
+        assert!(self.to_type == other.from_type);
+        let mut self_intervals = self.entries.to_vec();
+        self_intervals.sort();
+        let mut other_intervals = other.entries.to_vec();
+        other_intervals.sort();
+        let max_b = std::cmp::max(self_intervals.last().map_or(0, |i| i.b), other_intervals.last().map_or(0, |i| i.b));
+        self_intervals = Self::fill_holes(self_intervals, max_b);
+        other_intervals = Self::fill_holes(other_intervals, max_b);
+        let mut entries = vec![];
+        let mut a = 0;
+        'outer: for f in self_intervals {
+            assert_eq!(a, f.a);
+            let mut fa = f.apply(a).unwrap();
+            while let Some(g) = other_intervals.iter().find(|g| g.contains(fa)) {
+                let dest = g.apply(fa).unwrap();
+                let x = a + (g.b - fa);
+                if x < f.b {
+                    let h = IntervalMapping { a, b: x, dest };
+                    entries.push(h);
+                    a = x;
+                    fa = f.apply(a).unwrap();
+                } else {
+                    let h = IntervalMapping { a, b: f.b, dest };
+                    entries.push(h);
+                    a = f.b;
+                    continue 'outer;
+                }
+            }
+            // No interval in `other_interval` contains f(a), so fill the gap between a and f.b
+            // before proceeding to the next f.
+            entries.push(IntervalMapping { a, b: f.b, dest: fa });
+            a = f.b;
+        }
+        Map { from_type: self.from_type, to_type: other.to_type, entries }
+    }
+
+    fn apply(&self, x: u64) -> u64 {
         for entry in &self.entries {
             if let Some(y) = entry.apply(x) {
                 return y;
@@ -99,7 +163,7 @@ impl<'a> Map<'a> {
 
 #[derive(Debug)]
 struct Puzzle<'a> {
-    seeds: Vec<u32>,
+    seeds: Vec<u64>,
     maps: Vec<Map<'a>>,
 }
 
@@ -131,29 +195,47 @@ impl<'a> Puzzle<'a> {
         Ok(Self { seeds, maps })
     }
 
+    fn compress(&mut self) {
+        if let Some(mut x) = self.maps.pop() {
+            while let Some(next) = self.maps.pop() {
+                x = next.combine(&x);
+            }
+            assert!(self.maps.is_empty());
+            self.maps.push(x);
+        }
+    }
+
     fn seeds_to_ranges(&mut self) -> Result<(), Box<dyn Error>> {
         let mut result = vec![];
         let mut seed_iter = self.seeds.iter();
-        while let Some(start) = seed_iter.next() {
-            let range = seed_iter.next().ok_or("Expected range")?;
-            for i in *start..=*start+*range {
-                result.push(i)
+        while let Some(&start) = seed_iter.next() {
+            let range_len = *seed_iter.next().ok_or("Expected range length")?;
+            // Abuse IntervalMapping with a dummy destination
+            let interval = IntervalMapping { a: start, b: start + range_len, dest: 0 };
+            assert!(self.maps.len() == 1);
+            let map = self.maps.first().unwrap();
+            // Add all source interval starts that lie within `interval` to the seeds
+            for mapping in &map.entries {
+                if interval.contains(mapping.a) {
+                    result.push(mapping.a);
+                }
             }
+            result.push(interval.a);
         }
         self.seeds = result;
         Ok(())
     }
 
-    fn min_for_seeds(&self) -> Result<u32, Box<dyn Error>> {
+    fn min_for_seeds(&self) -> Result<u64, Box<dyn Error>> {
         // Apply all maps in turn to the seeds and remember minimum of the results
-        let mut maybe_min: Option<u32> = None;
+        let mut maybe_min: Option<u64> = None;
         for seed in &self.seeds {
             let mut value = *seed;
             let mut value_type = "seed";
             for map in &self.maps {
                 // Map must have the right type as input
                 if map.from_type != value_type {
-                    return Err("Map has from_type {map.from_type}, but expected {type}".into());
+                    return Err(format!("Map has from_type {}, but expected {value_type}", map.from_type).into());
                 }
                 value_type = map.to_type;
                 value = map.apply(value);
@@ -167,15 +249,16 @@ impl<'a> Puzzle<'a> {
     }
 }
 
- fn part1(input: &str) -> Result<u32, Box<dyn Error>> {
-    let puzzle = Puzzle::from_input(input)?;
+ fn part1(input: &str) -> Result<u64, Box<dyn Error>> {
+    let mut puzzle = Puzzle::from_input(input)?;
+    puzzle.compress();
     Ok(puzzle.min_for_seeds()?)
 }
 
-fn part2(input: &str) -> Result<u32, Box<dyn Error>> {
+fn part2(input: &str) -> Result<u64, Box<dyn Error>> {
     let mut puzzle = Puzzle::from_input(input)?;
+    puzzle.compress();
     puzzle.seeds_to_ranges()?;
-    // FIXME: This is slow as hell.
     Ok(puzzle.min_for_seeds()?)
 }
 
