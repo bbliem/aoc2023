@@ -1,6 +1,6 @@
 pub mod config;
 
-use std::collections::{HashSet, HashMap};
+use std::collections::HashSet;
 use std::error::Error;
 use std::fs;
 
@@ -123,39 +123,17 @@ impl Puzzle {
 
     fn sum_falling(&self) -> usize {
         let mut n = 0;
-        let mut support_for = HashMap::new();
-        for (id, support) in self.supported_by.iter().enumerate() {
-            if !support.is_empty() {
-                let mut support: Vec<_> = support.iter().cloned().collect();
-                support.sort();
-                let support_supports = support_for.entry(support).or_insert(HashSet::new());
-                support_supports.insert(id);
-            }
-        }
-        let mut blocks = self.blocks.clone();
-        blocks.sort_by_key(|b| usize::MAX - b.max_z);
-        // Observation:
-        // Let A be a block. To compute the set F of blocks that would fall by disintegrating A, we
-        // initialize F to the blocks exclusively supported by A. We repeat the following until
-        // nothing changes anymore: Add to F all blocks whose support is a subset of F.
-        for block in blocks {
-            let mut falling = self.supports_exclusively[block.id].clone();
-            loop {
-                let mut change = false;
-                for (support, supported) in &support_for {
-                    // Is support a subset of falling?
-                    if support.iter().all(|id| falling.contains(id)) {
-                        for b in supported {
-                            let inserted = falling.insert(*b);
-                            change = change || inserted;
-                        }
-                    }
-                }
-                if !change {
-                    break;
+        for (i, block) in self.blocks.iter().enumerate() {
+            let mut removed = HashSet::new();
+            removed.insert(block.id);
+            for other_block in &self.blocks[i+1..] {
+                let support = &self.supported_by[other_block.id];
+                // Is support a subset of removed?
+                if !support.is_empty() && support.iter().all(|id| removed.contains(id)) {
+                    removed.insert(other_block.id);
                 }
             }
-            n += falling.len();
+            n += removed.len() - 1;
         }
         n
     }
